@@ -17,7 +17,7 @@ COUNTRY_SERIES = {
         'interest_rate': 'DGS3MO',  # 3-month Treasury
     },
     'United Kingdom': {
-        'gdp_growth': 'GBRRGDPQDSNAQ',  # Real GDP growth
+        'gdp_growth': 'NAEXKP01GBQ189S',  # Real GDP levels (to be converted to growth)
         'unemployment': 'LRUNTTTTGBQ156S',  # Unemployment rate
         'inflation': 'GBRCPIALLMINMEI',  # CPI
         'interest_rate': 'IR3TIB01GBQ156N',  # 3-month rate

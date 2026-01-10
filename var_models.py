@@ -747,7 +747,13 @@ class VECMEstimator:
 
             # Create approximate FEVD based on residual correlations
             fevd_data = []
-            resid_corr = self.results.resid.corr().abs()
+
+            # Handle residuals as numpy array or DataFrame
+            resid = self.results.resid
+            if isinstance(resid, np.ndarray):
+                resid_corr = pd.DataFrame(np.corrcoef(resid.T)).abs()
+            else:
+                resid_corr = resid.corr().abs()
 
             for i, var in enumerate(self.data.columns):
                 for step in range(1, periods + 1):
@@ -789,15 +795,19 @@ class VECMEstimator:
         irf_boot = []
         for _ in range(n_bootstrap):
             try:
-                # Resample residuals
+                # Resample residuals - handle both DataFrame and numpy array
                 resid = self.results.resid
                 n_obs = len(resid)
                 boot_indices = np.random.randint(0, n_obs, n_obs)
-                boot_resid = resid.iloc[boot_indices]
+
+                if isinstance(resid, np.ndarray):
+                    boot_resid = resid[boot_indices]
+                else:
+                    boot_resid = resid.iloc[boot_indices].values
 
                 # Reconstruct data with bootstrapped residuals
                 # This is approximate - proper bootstrap for VECM is complex
-                boot_data = self.data + boot_resid.values
+                boot_data = self.data + boot_resid
 
                 # Fit VECM to bootstrap sample
                 boot_model = VECM(boot_data, k_ar_diff=1, coint_rank=self.coint_rank)
@@ -943,6 +953,90 @@ class VECMEstimator:
                 decompositions[var] = decomp_df
 
         return decompositions
+
+    def get_diagnostics(self) -> Dict:
+        """Get comprehensive model diagnostic tests for VECM"""
+        diagnostics = {}
+
+        if self.results is None:
+            return diagnostics
+
+        try:
+            # Handle residuals as numpy array (VECM typically returns numpy array)
+            resid = self.results.resid
+            if isinstance(resid, np.ndarray):
+                resid_df = pd.DataFrame(resid, columns=self.data.columns)
+            else:
+                resid_df = resid
+
+            # 1. Residual Autocorrelation - Portmanteau Test
+            try:
+                # VECM uses test_whiteness similar to VAR
+                whiteness = self.results.test_whiteness(nlags=10)
+                diagnostics['autocorrelation'] = {
+                    'test_name': 'Portmanteau Test (LM)',
+                    'statistic': whiteness.test_statistic,
+                    'p_value': whiteness.pvalue,
+                    'null_hypothesis': 'No residual autocorrelation',
+                    'passes': whiteness.pvalue > 0.05,
+                    'interpretation': 'Pass: No autocorrelation detected' if whiteness.pvalue > 0.05
+                                    else 'Fail: Autocorrelation detected - consider adjusting model'
+                }
+            except Exception as e:
+                diagnostics['autocorrelation'] = {'error': str(e)}
+
+            # 2. Normality Test
+            try:
+                normality = self.results.test_normality()
+                diagnostics['normality'] = {
+                    'test_name': 'Jarque-Bera Normality Test',
+                    'statistic': normality.test_statistic,
+                    'p_value': normality.pvalue,
+                    'null_hypothesis': 'Residuals are normally distributed',
+                    'passes': normality.pvalue > 0.05,
+                    'interpretation': 'Pass: Residuals appear normally distributed' if normality.pvalue > 0.05
+                                    else 'Fail: Non-normal residuals - bootstrap inference recommended'
+                }
+            except Exception as e:
+                diagnostics['normality'] = {'error': str(e)}
+
+            # 3. Model Information Criteria
+            try:
+                diagnostics['model_stats'] = {
+                    'aic': float(self.results.aic),
+                    'bic': float(self.results.bic),
+                    'hqic': float(self.results.hqic),
+                    'log_likelihood': float(self.results.llf) if hasattr(self.results, 'llf') else None,
+                    'coint_rank': self.coint_rank
+                }
+            except Exception as e:
+                diagnostics['model_stats'] = {'error': str(e)}
+
+            # 4. Residual Statistics
+            try:
+                diagnostics['residual_stats'] = {
+                    'means': resid_df.mean().to_dict(),
+                    'std_devs': resid_df.std().to_dict(),
+                    'skewness': resid_df.skew().to_dict(),
+                    'kurtosis': resid_df.kurtosis().to_dict()
+                }
+            except Exception as e:
+                diagnostics['residual_stats'] = {'error': str(e)}
+
+            # 5. Cointegration diagnostics
+            try:
+                diagnostics['cointegration'] = {
+                    'rank': self.coint_rank,
+                    'num_variables': len(self.data.columns),
+                    'interpretation': f'VECM with {self.coint_rank} cointegrating relationship(s)'
+                }
+            except Exception as e:
+                diagnostics['cointegration'] = {'error': str(e)}
+
+        except Exception as e:
+            diagnostics['general_error'] = str(e)
+
+        return diagnostics
 
 
 class RobustVAREstimator(VAREstimator):

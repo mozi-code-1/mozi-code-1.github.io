@@ -496,6 +496,36 @@ def main():
     with tabs[1]:
         st.markdown('<p class="section-header">Stationarity Tests (ADF)</p>', unsafe_allow_html=True)
 
+        # Econometric guidance
+        with st.expander("📚 Stationarity & Model Selection Guidance"):
+            st.markdown("""
+            **How to choose between VAR and VECM:**
+
+            1. **All variables stationary (ADF p-value < 0.05):**
+               - ✅ Use VAR in levels
+               - Variables return to their mean after shocks
+
+            2. **Unit roots detected BUT no cointegration:**
+               - ✅ Use VAR in first differences
+               - Variables drift apart permanently
+               - Note: Differencing loses long-run information
+
+            3. **Unit roots detected AND cointegration found:**
+               - ✅ Use VECM (Vector Error Correction Model)
+               - Variables share long-run equilibrium relationship
+               - VECM preserves both short-run dynamics and long-run equilibrium
+
+            **What is Cointegration?**
+            - Non-stationary variables that share a common stochastic trend
+            - They may drift apart temporarily but return to long-run relationship
+            - Example: GDP and consumption often cointegrate (permanent income hypothesis)
+
+            **Johansen Test interpretation:**
+            - Tests for number of cointegrating relationships (rank)
+            - If rank > 0: Use VECM with that many cointegrating vectors
+            - If rank = 0: No cointegration, use VAR in differences
+            """)
+
         # Filter out COVID dummy for tests
         data1_test = data1.drop('COVID_DUMMY', axis=1) if 'COVID_DUMMY' in data1.columns else data1
         data2_test = data2.drop('COVID_DUMMY', axis=1) if 'COVID_DUMMY' in data2.columns else data2
@@ -562,6 +592,30 @@ def main():
     with tabs[2]:
         st.markdown('<p class="section-header">Model Estimation</p>', unsafe_allow_html=True)
 
+        # Econometric best practices warnings
+        st.info("⚠️ **Variable Ordering Matters**: For Cholesky identification, variable ordering determines which variables respond contemporaneously. " +
+                "Common macro ordering: slow-moving variables (GDP, unemployment) before fast-moving variables (inflation, interest rates).")
+
+        # Variable ordering controls
+        with st.expander("🔧 Reorder Variables"):
+            st.write("Current order: " + ", ".join(data1.drop('COVID_DUMMY', axis=1, errors='ignore').columns if 'COVID_DUMMY' in data1.columns else data1.columns))
+            st.write("**Recommended ordering:** GDP growth → Unemployment → Inflation → Interest rate")
+            if st.button("Apply Recommended Ordering"):
+                # Define recommended order
+                recommended_order = []
+                current_cols = data1.drop('COVID_DUMMY', axis=1, errors='ignore').columns if 'COVID_DUMMY' in data1.columns else data1.columns
+
+                for var_type in ['gdp_growth', 'unemployment', 'inflation', 'interest_rate']:
+                    for col in current_cols:
+                        if var_type in col.lower():
+                            recommended_order.append(col)
+
+                if len(recommended_order) == len(current_cols):
+                    data1 = data1[recommended_order + (['COVID_DUMMY'] if 'COVID_DUMMY' in data1.columns else [])]
+                    data2 = data2[recommended_order + (['COVID_DUMMY'] if 'COVID_DUMMY' in data2.columns else [])]
+                    st.success("✅ Variables reordered!")
+                    st.rerun()
+
         col1, col2 = st.columns(2)
 
         # Estimate VAR for Country 1
@@ -616,6 +670,21 @@ def main():
                         lag_selection = var1.select_lag_order(maxlags=max_lags)
 
                         st.write("**Lag Order Selection:**")
+                        st.write("📊 BIC is preferred for VAR models (penalizes complexity more)")
+
+                        # Enhanced lag selection display with all criteria
+                        with st.expander("📈 Detailed Lag Selection Criteria"):
+                            for lag in range(1, min(max_lags + 1, 9)):
+                                if lag <= max_lags:
+                                    lag_info = lag_selection.get(lag, {})
+                                    if lag_info:
+                                        st.write(f"**Lag {lag}:**")
+                                        cols = st.columns(4)
+                                        cols[0].metric("AIC", f"{lag_info.get('aic', 0):.2f}")
+                                        cols[1].metric("BIC", f"{lag_info.get('bic', 0):.2f}")
+                                        cols[2].metric("HQ", f"{lag_info.get('hqic', 0):.2f}")
+                                        cols[3].metric("FPE", f"{lag_info.get('fpe', 0):.4f}")
+
                         lag_df = pd.DataFrame({
                             'Criterion': ['AIC', 'BIC', 'HQIC'],
                             'Selected Lags': [
@@ -630,6 +699,16 @@ def main():
                         var1.fit(ic=ic_choice)
 
                         st.metric("Selected Lag Order", var1.lag_order)
+
+                        # Overfitting warning
+                        n_vars = len(data1_endog.columns)
+                        n_params = n_vars**2 * var1.lag_order + n_vars  # k^2 * p + k
+                        n_obs = len(data1_endog) - var1.lag_order
+                        param_ratio = n_params / n_obs
+
+                        if param_ratio > 0.1:
+                            st.warning(f"⚠️ **Overfitting Risk**: {n_params} parameters with {n_obs} observations " +
+                                     f"(ratio: {param_ratio:.2%}). Consider reducing lags or variables.")
 
                         st.session_state['model1'] = var1
                         st.session_state['model_type1'] = 'VAR'
@@ -754,10 +833,16 @@ def main():
             model = st.session_state['model1'] if country_choice == country1 else st.session_state['model2']
             model_type = st.session_state['model_type1'] if country_choice == country1 else st.session_state['model_type2']
 
+            # Both VAR and VECM now support diagnostics
             if model_type == 'VAR':
                 st.info(f"📊 Showing diagnostics for {model_type} model with {model.lag_order} lags")
+            else:
+                st.info(f"📊 Showing diagnostics for {model_type} model with cointegration rank {model.coint_rank}")
 
-                diagnostics = model.get_diagnostics()
+            diagnostics = model.get_diagnostics()
+
+            # VAR-specific diagnostics
+            if model_type == 'VAR':
 
                 # Summary section
                 st.markdown("### 🎯 Overall Model Quality")
@@ -993,8 +1078,83 @@ def main():
 
                     st.caption("**What it means:** Residuals should be random (no patterns). ACF/PACF should be mostly within confidence bands (red dashed lines).")
 
-            else:
-                st.info("📊 Full diagnostics currently available for VAR models only. Basic tests available for VECM.")
+            else:  # VECM diagnostics
+                # Summary section
+                st.markdown("### 🎯 Overall Model Quality (VECM)")
+                col1, col2, col3 = st.columns(3)
+
+                with col1:
+                    passes_autocorr = diagnostics.get('autocorrelation', {}).get('passes', False)
+                    st.metric("Autocorrelation", "✅ Pass" if passes_autocorr else "❌ Fail")
+
+                with col2:
+                    passes_normal = diagnostics.get('normality', {}).get('passes', False)
+                    st.metric("Normality", "✅ Pass" if passes_normal else "❌ Fail")
+
+                with col3:
+                    coint_rank = diagnostics.get('cointegration', {}).get('rank', 0)
+                    st.metric("Coint. Rank", coint_rank)
+
+                # 1. Autocorrelation Test
+                st.markdown("### 1️⃣ Residual Autocorrelation")
+                if 'autocorrelation' in diagnostics and 'error' not in diagnostics['autocorrelation']:
+                    auto_test = diagnostics['autocorrelation']
+                    col1, col2 = st.columns(2)
+
+                    with col1:
+                        st.metric("Test Statistic", f"{auto_test['statistic']:.4f}")
+                        st.metric("p-value", f"{auto_test['p_value']:.4f}")
+
+                    with col2:
+                        if auto_test['passes']:
+                            st.success("✅ " + auto_test['interpretation'])
+                        else:
+                            st.error("❌ " + auto_test['interpretation'])
+
+                # 2. Normality Test
+                st.markdown("### 2️⃣ Normality Test")
+                if 'normality' in diagnostics and 'error' not in diagnostics['normality']:
+                    norm_test = diagnostics['normality']
+                    col1, col2 = st.columns(2)
+
+                    with col1:
+                        st.metric("Test Statistic", f"{norm_test['statistic']:.4f}")
+                        st.metric("p-value", f"{norm_test['p_value']:.4f}")
+
+                    with col2:
+                        if norm_test['passes']:
+                            st.success("✅ " + norm_test['interpretation'])
+                        else:
+                            st.warning("⚠️ " + norm_test['interpretation'])
+
+                # 3. Model Information Criteria
+                st.markdown("### 3️⃣ Model Information Criteria")
+                if 'model_stats' in diagnostics and 'error' not in diagnostics['model_stats']:
+                    stats = diagnostics['model_stats']
+                    col1, col2, col3 = st.columns(3)
+
+                    with col1:
+                        st.metric("AIC", f"{stats.get('aic', 0):.2f}")
+
+                    with col2:
+                        st.metric("BIC", f"{stats.get('bic', 0):.2f}")
+
+                    with col3:
+                        st.metric("HQIC", f"{stats.get('hqic', 0):.2f}")
+
+                    st.caption("**Lower values are better.** BIC penalizes complexity most.")
+
+                # 4. Cointegration Information
+                st.markdown("### 4️⃣ Cointegration Diagnostics")
+                if 'cointegration' in diagnostics:
+                    coint_info = diagnostics['cointegration']
+                    st.info(f"📊 {coint_info.get('interpretation', 'N/A')}")
+                    col1, col2 = st.columns(2)
+                    with col1:
+                        st.metric("Cointegration Rank", coint_info.get('rank', 0))
+                    with col2:
+                        st.metric("Number of Variables", coint_info.get('num_variables', 0))
+                    st.caption("**What it means:** VECM models long-run equilibrium relationships between non-stationary variables.")
 
     # TAB 5: Impulse Response Functions
     with tabs[4]:
