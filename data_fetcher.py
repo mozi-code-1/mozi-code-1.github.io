@@ -70,10 +70,17 @@ class DataFetcher:
         self,
         country: str,
         start_date: str,
-        end_date: str
+        end_date: str,
+        covid_handling: str = "No adjustment"
     ) -> Tuple[pd.DataFrame, Dict[str, str]]:
         """
         Fetch all macroeconomic variables for a country
+
+        Args:
+            country: Country name
+            start_date: Start date for data
+            end_date: End date for data
+            covid_handling: COVID-19 handling method
 
         Returns:
             data: DataFrame with all variables
@@ -99,9 +106,14 @@ class DataFetcher:
 
                 # Handle specific transformations
                 if var_name == 'gdp_growth':
-                    # If we have GDP levels, convert to growth rates
-                    if series_id not in ['A191RL1Q225SBEA', 'GBRRGDPQDSNAQ']:
-                        series_q = series_q.pct_change() * 100
+                    # Only A191RL1Q225SBEA (US) is already a growth rate
+                    # All other series are GDP levels and need to be converted
+                    if series_id == 'A191RL1Q225SBEA':
+                        # US series is already annualized growth rate
+                        pass
+                    else:
+                        # Convert levels to quarter-over-quarter growth rate (annualized)
+                        series_q = series_q.pct_change() * 100 * 4
                 elif var_name == 'inflation':
                     # Convert CPI to inflation rate (YoY % change)
                     series_q = series_q.pct_change(4) * 100
@@ -124,11 +136,28 @@ class DataFetcher:
         # Combine into DataFrame
         df = pd.DataFrame(data_dict)
 
-        # Drop rows with any NaN values
+        # Drop rows with any NaN values (from transformations)
         df = df.dropna()
 
         # Rename columns for clarity
         df.columns = ['GDP Growth', 'Unemployment', 'Inflation', 'Interest Rate']
+
+        # Align date ranges - find common dates across all variables
+        if len(df) > 0:
+            # Ensure we have complete data
+            df = df.dropna()
+
+        # Handle COVID-19 period based on user selection
+        if covid_handling == "Exclude COVID period":
+            # Drop 2020Q1 through 2021Q4
+            covid_start = pd.Timestamp('2020-01-01')
+            covid_end = pd.Timestamp('2021-12-31')
+            df = df[(df.index < covid_start) | (df.index > covid_end)]
+        elif covid_handling == "COVID dummy variable":
+            # Add a COVID dummy column (will be used as exogenous variable)
+            covid_start = pd.Timestamp('2020-01-01')
+            covid_end = pd.Timestamp('2021-12-31')
+            df['COVID_DUMMY'] = ((df.index >= covid_start) & (df.index <= covid_end)).astype(int)
 
         return df, series_info
 
@@ -151,3 +180,31 @@ def get_data_summary(df: pd.DataFrame) -> pd.DataFrame:
     summary.loc['kurtosis'] = df.kurtosis()
 
     return summary
+
+
+def align_date_ranges(df1: pd.DataFrame, df2: pd.DataFrame) -> Tuple[pd.DataFrame, pd.DataFrame]:
+    """
+    Align two dataframes to have the same date range
+
+    Args:
+        df1: First dataframe
+        df2: Second dataframe
+
+    Returns:
+        Tuple of aligned dataframes with common date range
+    """
+    # Find common date range
+    common_start = max(df1.index.min(), df2.index.min())
+    common_end = min(df1.index.max(), df2.index.max())
+
+    # Filter both dataframes to common range
+    df1_aligned = df1[(df1.index >= common_start) & (df1.index <= common_end)]
+    df2_aligned = df2[(df2.index >= common_start) & (df2.index <= common_end)]
+
+    # Find exact common dates (in case of missing values)
+    common_dates = df1_aligned.index.intersection(df2_aligned.index)
+
+    df1_aligned = df1_aligned.loc[common_dates]
+    df2_aligned = df2_aligned.loc[common_dates]
+
+    return df1_aligned, df2_aligned

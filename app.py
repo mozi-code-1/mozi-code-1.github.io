@@ -9,12 +9,13 @@ from plotly.subplots import make_subplots
 import io
 from datetime import datetime, timedelta
 
-from data_fetcher import DataFetcher, get_data_summary
+from data_fetcher import DataFetcher, get_data_summary, align_date_ranges
 from var_models import (
     StationarityTester,
     CointegrationTester,
     VAREstimator,
-    VECMEstimator
+    VECMEstimator,
+    RobustVAREstimator
 )
 
 # Page configuration
@@ -54,10 +55,10 @@ st.markdown("""
 
 
 @st.cache_data(ttl=3600)
-def fetch_data(country, start_date, end_date, api_key):
+def fetch_data(country, start_date, end_date, api_key, covid_handling="No adjustment"):
     """Cached data fetching"""
     fetcher = DataFetcher(api_key)
-    return fetcher.fetch_country_data(country, start_date, end_date)
+    return fetcher.fetch_country_data(country, start_date, end_date, covid_handling)
 
 
 def plot_time_series(data: pd.DataFrame, title: str = "Time Series"):
@@ -377,30 +378,59 @@ def main():
     irf_periods = st.sidebar.slider("IRF Periods", 4, 40, 24)
     forecast_periods = st.sidebar.slider("Forecast Periods", 4, 20, 12)
 
+    # COVID-19 handling options
+    st.sidebar.subheader("🦠 COVID-19 Handling")
+    covid_handling = st.sidebar.radio(
+        "How to handle COVID-19 period?",
+        [
+            "No adjustment",
+            "Exclude COVID period",
+            "COVID dummy variable",
+            "Fat-tailed errors (Student's t)"
+        ],
+        help="""
+        - **No adjustment**: Use raw data including COVID period
+        - **Exclude COVID period**: Remove 2020Q1-2021Q4 entirely
+        - **COVID dummy variable**: Include dummy for COVID quarters as exogenous variable
+        - **Fat-tailed errors**: Use Student's t errors to downweight outliers (ECB recommended)
+        """
+    )
+
     # Fetch data button
     if st.sidebar.button("🔄 Fetch Data and Estimate Models", type="primary"):
         with st.spinner(f"Fetching data for {country1} and {country2}..."):
             try:
-                # Fetch data for both countries
-                data1, info1 = fetch_data(country1, str(start_date), str(end_date), api_key)
-                data2, info2 = fetch_data(country2, str(start_date), str(end_date), api_key)
+                # Fetch data for both countries with COVID handling
+                data1, info1 = fetch_data(country1, str(start_date), str(end_date), api_key, covid_handling)
+                data2, info2 = fetch_data(country2, str(start_date), str(end_date), api_key, covid_handling)
 
                 if len(data1) < 20 or len(data2) < 20:
                     st.error("Insufficient data. Please select a different date range or countries.")
                     return
 
+                # Align date ranges between countries
+                data1_aligned, data2_aligned = align_date_ranges(data1, data2)
+
+                if len(data1_aligned) < 20 or len(data2_aligned) < 20:
+                    st.error("Insufficient overlapping data. Please select a different date range or countries.")
+                    return
+
                 # Store in session state
-                st.session_state['data1'] = data1
-                st.session_state['data2'] = data2
+                st.session_state['data1'] = data1_aligned
+                st.session_state['data2'] = data2_aligned
                 st.session_state['country1'] = country1
                 st.session_state['country2'] = country2
                 st.session_state['info1'] = info1
                 st.session_state['info2'] = info2
+                st.session_state['covid_handling'] = covid_handling
 
-                st.success("✅ Data fetched successfully!")
+                st.success(f"✅ Data fetched successfully! Date range: {data1_aligned.index.min().strftime('%Y-%m-%d')} to {data1_aligned.index.max().strftime('%Y-%m-%d')}")
+                st.info(f"COVID-19 handling: {covid_handling}")
 
             except Exception as e:
                 st.error(f"Error fetching data: {str(e)}")
+                import traceback
+                st.code(traceback.format_exc())
                 return
 
     # Check if data is available
@@ -429,17 +459,21 @@ def main():
     with tabs[0]:
         st.markdown('<p class="section-header">Raw Time Series Data</p>', unsafe_allow_html=True)
 
+        # Filter out COVID dummy for visualization
+        data1_plot = data1.drop('COVID_DUMMY', axis=1) if 'COVID_DUMMY' in data1.columns else data1
+        data2_plot = data2.drop('COVID_DUMMY', axis=1) if 'COVID_DUMMY' in data2.columns else data2
+
         col1, col2 = st.columns(2)
 
         with col1:
             st.subheader(f"{country1}")
             st.plotly_chart(
-                plot_time_series(data1, f"{country1} - Macroeconomic Variables"),
+                plot_time_series(data1_plot, f"{country1} - Macroeconomic Variables"),
                 use_container_width=True
             )
 
             with st.expander("📊 Summary Statistics"):
-                st.dataframe(get_data_summary(data1), use_container_width=True)
+                st.dataframe(get_data_summary(data1_plot), use_container_width=True)
 
             with st.expander("📋 Data Sample"):
                 st.dataframe(data1.tail(10), use_container_width=True)
@@ -447,12 +481,12 @@ def main():
         with col2:
             st.subheader(f"{country2}")
             st.plotly_chart(
-                plot_time_series(data2, f"{country2} - Macroeconomic Variables"),
+                plot_time_series(data2_plot, f"{country2} - Macroeconomic Variables"),
                 use_container_width=True
             )
 
             with st.expander("📊 Summary Statistics"):
-                st.dataframe(get_data_summary(data2), use_container_width=True)
+                st.dataframe(get_data_summary(data2_plot), use_container_width=True)
 
             with st.expander("📋 Data Sample"):
                 st.dataframe(data2.tail(10), use_container_width=True)
@@ -461,16 +495,20 @@ def main():
     with tabs[1]:
         st.markdown('<p class="section-header">Stationarity Tests (ADF)</p>', unsafe_allow_html=True)
 
+        # Filter out COVID dummy for tests
+        data1_test = data1.drop('COVID_DUMMY', axis=1) if 'COVID_DUMMY' in data1.columns else data1
+        data2_test = data2.drop('COVID_DUMMY', axis=1) if 'COVID_DUMMY' in data2.columns else data2
+
         col1, col2 = st.columns(2)
 
         with col1:
             st.subheader(f"{country1}")
-            adf_results1 = StationarityTester.test_dataframe(data1)
+            adf_results1 = StationarityTester.test_dataframe(data1_test)
             st.dataframe(adf_results1, use_container_width=True)
 
         with col2:
             st.subheader(f"{country2}")
-            adf_results2 = StationarityTester.test_dataframe(data2)
+            adf_results2 = StationarityTester.test_dataframe(data2_test)
             st.dataframe(adf_results2, use_container_width=True)
 
         st.markdown('<p class="section-header">Johansen Cointegration Test</p>', unsafe_allow_html=True)
@@ -480,7 +518,7 @@ def main():
         with col1:
             st.subheader(f"{country1}")
             try:
-                coint1 = CointegrationTester.johansen_test(data1, det_order=0, k_ar_diff=2)
+                coint1 = CointegrationTester.johansen_test(data1_test, det_order=0, k_ar_diff=2)
 
                 st.write("**Trace Statistic Test:**")
                 st.dataframe(coint1['trace_results'], use_container_width=True)
@@ -501,7 +539,7 @@ def main():
         with col2:
             st.subheader(f"{country2}")
             try:
-                coint2 = CointegrationTester.johansen_test(data2, det_order=0, k_ar_diff=2)
+                coint2 = CointegrationTester.johansen_test(data2_test, det_order=0, k_ar_diff=2)
 
                 st.write("**Trace Statistic Test:**")
                 st.dataframe(coint2['trace_results'], use_container_width=True)
@@ -552,9 +590,26 @@ def main():
                             st.dataframe(vecm1.get_cointegration_vectors(), use_container_width=True)
 
                     else:
-                        st.info("📊 Estimating VAR model")
+                        # Get COVID handling setting
+                        covid_handling = st.session_state.get('covid_handling', 'No adjustment')
 
-                        var1 = VAREstimator(data1)
+                        # Extract exogenous variables if COVID dummy is used
+                        exog1 = None
+                        data1_endog = data1
+                        if 'COVID_DUMMY' in data1.columns:
+                            exog1 = data1[['COVID_DUMMY']]
+                            data1_endog = data1.drop('COVID_DUMMY', axis=1)
+                            st.info("📊 Estimating VAR model with COVID dummy as exogenous variable")
+                        elif covid_handling == "Fat-tailed errors (Student's t)":
+                            st.info("📊 Estimating Robust VAR model with Student's t errors")
+                        else:
+                            st.info("📊 Estimating VAR model")
+
+                        # Choose estimator based on COVID handling
+                        if covid_handling == "Fat-tailed errors (Student's t)":
+                            var1 = RobustVAREstimator(data1_endog, exog=exog1, df_t=5.0)
+                        else:
+                            var1 = VAREstimator(data1_endog, exog=exog1)
 
                         # Lag selection
                         lag_selection = var1.select_lag_order(maxlags=max_lags)
@@ -624,9 +679,26 @@ def main():
                             st.dataframe(vecm2.get_cointegration_vectors(), use_container_width=True)
 
                     else:
-                        st.info("📊 Estimating VAR model")
+                        # Get COVID handling setting
+                        covid_handling = st.session_state.get('covid_handling', 'No adjustment')
 
-                        var2 = VAREstimator(data2)
+                        # Extract exogenous variables if COVID dummy is used
+                        exog2 = None
+                        data2_endog = data2
+                        if 'COVID_DUMMY' in data2.columns:
+                            exog2 = data2[['COVID_DUMMY']]
+                            data2_endog = data2.drop('COVID_DUMMY', axis=1)
+                            st.info("📊 Estimating VAR model with COVID dummy as exogenous variable")
+                        elif covid_handling == "Fat-tailed errors (Student's t)":
+                            st.info("📊 Estimating Robust VAR model with Student's t errors")
+                        else:
+                            st.info("📊 Estimating VAR model")
+
+                        # Choose estimator based on COVID handling
+                        if covid_handling == "Fat-tailed errors (Student's t)":
+                            var2 = RobustVAREstimator(data2_endog, exog=exog2, df_t=5.0)
+                        else:
+                            var2 = VAREstimator(data2_endog, exog=exog2)
 
                         # Lag selection
                         lag_selection = var2.select_lag_order(maxlags=max_lags)

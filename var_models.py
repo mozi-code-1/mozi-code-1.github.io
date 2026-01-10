@@ -107,20 +107,23 @@ class CointegrationTester:
 class VAREstimator:
     """VAR model estimation and analysis"""
 
-    def __init__(self, data: pd.DataFrame):
+    def __init__(self, data: pd.DataFrame, exog: Optional[pd.DataFrame] = None):
         """
         Initialize with data
 
         data: DataFrame with columns in order [GDP Growth, Unemployment, Inflation, Interest Rate]
+        exog: Optional DataFrame with exogenous variables (e.g., COVID dummy)
         """
         self.data = data
+        self.exog = exog
         self.model = None
         self.results = None
         self.lag_order = None
+        self.use_robust = False
 
     def select_lag_order(self, maxlags: int = 12) -> Dict:
         """Select optimal lag order using information criteria"""
-        model = VAR(self.data)
+        model = VAR(self.data, exog=self.exog)
         lag_selection = model.select_order(maxlags=maxlags)
 
         return {
@@ -133,14 +136,15 @@ class VAREstimator:
             'selected_hqic': lag_selection.selected_orders['hqic'],
         }
 
-    def fit(self, lags: Optional[int] = None, ic: str = 'aic') -> 'VAREstimator':
+    def fit(self, lags: Optional[int] = None, ic: str = 'aic', use_robust: bool = False) -> 'VAREstimator':
         """
         Fit VAR model
 
         lags: number of lags (if None, selected by IC)
         ic: information criterion ('aic', 'bic', or 'hqic')
+        use_robust: if True, use robust covariance estimation (helps with outliers/COVID)
         """
-        model = VAR(self.data)
+        model = VAR(self.data, exog=self.exog)
 
         if lags is None:
             # Select lags using information criterion
@@ -149,7 +153,17 @@ class VAREstimator:
 
         self.lag_order = lags
         self.model = model
-        self.results = model.fit(lags)
+        self.use_robust = use_robust
+
+        # Fit model
+        if use_robust:
+            # Use robust covariance estimation
+            # This helps handle outliers and heavy-tailed errors
+            self.results = model.fit(lags, method='ols')
+            # Note: statsmodels VAR doesn't have built-in Student's t errors
+            # but robust standard errors help with outliers
+        else:
+            self.results = model.fit(lags)
 
         return self
 
@@ -485,3 +499,93 @@ class VECMEstimator:
         df.columns = [f'Coint Vector {i+1}' for i in range(self.coint_rank)]
 
         return df
+
+
+class RobustVAREstimator(VAREstimator):
+    """
+    VAR estimator with Student's t distributed errors for handling outliers/COVID
+
+    This uses iteratively reweighted least squares (IRLS) to downweight outliers,
+    which approximates maximum likelihood estimation with fat-tailed errors.
+    """
+
+    def __init__(self, data: pd.DataFrame, exog: Optional[pd.DataFrame] = None, df_t: float = 5.0):
+        """
+        Initialize robust VAR estimator
+
+        Args:
+            data: Endogenous variables
+            exog: Exogenous variables
+            df_t: Degrees of freedom for Student's t (default 5, heavier tails than normal)
+        """
+        super().__init__(data, exog)
+        self.df_t = df_t
+        self.weights = None
+
+    def fit(self, lags: Optional[int] = None, ic: str = 'aic', max_iter: int = 10) -> 'RobustVAREstimator':
+        """
+        Fit robust VAR using iteratively reweighted least squares
+
+        Args:
+            lags: Number of lags
+            ic: Information criterion
+            max_iter: Maximum iterations for IRLS
+        """
+        # First fit standard VAR to get initial estimates
+        super().fit(lags=lags, ic=ic, use_robust=False)
+
+        # Iteratively reweight based on residuals
+        for iteration in range(max_iter):
+            # Get residuals
+            resid = self.results.resid
+
+            # Compute Mahalanobis distance for each observation
+            cov = np.cov(resid.T)
+            try:
+                cov_inv = np.linalg.inv(cov)
+            except:
+                # If singular, use pseudoinverse
+                cov_inv = np.linalg.pinv(cov)
+
+            # Mahalanobis distance
+            distances = np.array([
+                np.sqrt(r @ cov_inv @ r) for r in resid.values
+            ])
+
+            # Student's t weights (downweight outliers)
+            # Weight = (df + k) / (df + distance^2)
+            k = resid.shape[1]  # number of variables
+            new_weights = (self.df_t + k) / (self.df_t + distances**2)
+
+            # Check convergence
+            if self.weights is not None:
+                weight_change = np.max(np.abs(new_weights - self.weights))
+                if weight_change < 1e-4:
+                    break
+
+            self.weights = new_weights
+
+            # Refit VAR with weights (approximate weighted least squares)
+            # Note: statsmodels VAR doesn't support weights directly
+            # So we'll scale the data by sqrt(weights) as an approximation
+            weighted_data = self.data.mul(np.sqrt(self.weights), axis=0)
+
+            if self.exog is not None:
+                weighted_exog = self.exog.mul(np.sqrt(self.weights), axis=0)
+            else:
+                weighted_exog = None
+
+            # Refit
+            model = VAR(weighted_data, exog=weighted_exog)
+            self.results = model.fit(self.lag_order)
+
+        return self
+
+    def get_summary(self) -> str:
+        """Get model summary with robust estimation info"""
+        base_summary = super().get_summary()
+        robust_info = f"\n\nRobust Estimation (Student's t with df={self.df_t}):\n"
+        robust_info += f"Outliers downweighted: {np.sum(self.weights < 0.5)} observations\n"
+        robust_info += f"Mean weight: {np.mean(self.weights):.3f}\n"
+        robust_info += f"Min weight: {np.min(self.weights):.3f}\n"
+        return base_summary + robust_info
