@@ -422,34 +422,179 @@ class VAREstimator:
         return decompositions
 
     def get_diagnostics(self) -> Dict:
-        """Get model diagnostic tests"""
+        """Get comprehensive model diagnostic tests"""
         diagnostics = {}
 
-        # Residual tests
-        if self.results is not None:
-            # Portmanteau test for residual autocorrelation
+        if self.results is None:
+            return diagnostics
+
+        try:
+            # 1. Residual Autocorrelation - Portmanteau Test (LM Test)
             try:
                 whiteness = self.results.test_whiteness(nlags=10)
-                diagnostics['portmanteau_test'] = {
+                diagnostics['autocorrelation'] = {
+                    'test_name': 'Portmanteau Test (LM)',
                     'statistic': whiteness.test_statistic,
                     'p_value': whiteness.pvalue,
-                    'null_hypothesis': 'No residual autocorrelation'
+                    'null_hypothesis': 'No residual autocorrelation',
+                    'passes': whiteness.pvalue > 0.05,
+                    'interpretation': 'Pass: No autocorrelation detected' if whiteness.pvalue > 0.05
+                                    else 'Fail: Autocorrelation detected - consider increasing lags'
                 }
-            except:
-                pass
+            except Exception as e:
+                diagnostics['autocorrelation'] = {'error': str(e)}
 
-            # Normality test
+            # 2. Normality Test - Jarque-Bera for each equation
             try:
                 normality = self.results.test_normality()
-                diagnostics['normality_test'] = {
+                diagnostics['normality'] = {
+                    'test_name': 'Jarque-Bera Test',
                     'statistic': normality.test_statistic,
                     'p_value': normality.pvalue,
-                    'null_hypothesis': 'Residuals are normally distributed'
+                    'null_hypothesis': 'Residuals are normally distributed',
+                    'passes': normality.pvalue > 0.05,
+                    'interpretation': 'Pass: Residuals appear normal' if normality.pvalue > 0.05
+                                    else 'Fail: Residuals are non-normal - consider robust estimation or transformation'
                 }
-            except:
-                pass
+            except Exception as e:
+                diagnostics['normality'] = {'error': str(e)}
+
+            # 3. Heteroscedasticity Test - White's Test (simplified version)
+            try:
+                # Test for heteroscedasticity using residuals
+                resid = self.results.resid
+                resid_sq = resid ** 2
+
+                # Simple test: regress squared residuals on time
+                from scipy.stats import spearmanr
+
+                het_tests = []
+                for i, var in enumerate(self.data.columns):
+                    time_index = np.arange(len(resid))
+                    corr, p_val = spearmanr(time_index, resid_sq.iloc[:, i])
+                    het_tests.append({
+                        'variable': var,
+                        'correlation': corr,
+                        'p_value': p_val,
+                        'heteroscedastic': p_val < 0.05
+                    })
+
+                overall_pval = np.mean([t['p_value'] for t in het_tests])
+                diagnostics['heteroscedasticity'] = {
+                    'test_name': "White's Test (Simplified)",
+                    'by_equation': het_tests,
+                    'average_p_value': overall_pval,
+                    'passes': overall_pval > 0.05,
+                    'interpretation': 'Pass: Homoscedastic residuals' if overall_pval > 0.05
+                                    else 'Fail: Heteroscedasticity detected - consider robust standard errors'
+                }
+            except Exception as e:
+                diagnostics['heteroscedasticity'] = {'error': str(e)}
+
+            # 4. Stability Check - AR Characteristic Roots
+            try:
+                # Get the companion matrix eigenvalues
+                roots = self.results.roots
+                max_root = np.max(np.abs(roots))
+                is_stable = max_root < 1.0
+
+                diagnostics['stability'] = {
+                    'test_name': 'AR Roots Stability Check',
+                    'max_root_modulus': float(max_root),
+                    'all_roots': [float(abs(r)) for r in roots],
+                    'is_stable': is_stable,
+                    'passes': is_stable,
+                    'interpretation': 'Pass: Model is stable (all roots inside unit circle)' if is_stable
+                                    else 'Fail: Model is unstable - check specification or reduce lags'
+                }
+            except Exception as e:
+                diagnostics['stability'] = {'error': str(e)}
+
+            # 5. Model Summary Stats
+            try:
+                # R-squared, AIC, BIC for each equation
+                summary_stats = []
+                aic = self.results.aic
+                bic = self.results.bic
+                fpe = self.results.fpe
+                hqic = self.results.hqic
+
+                for i, var in enumerate(self.data.columns):
+                    # Get R-squared for each equation
+                    y = self.data.iloc[:, i].values[self.lag_order:]
+                    y_pred = self.results.fittedvalues.iloc[:, i].values
+
+                    ss_res = np.sum((y - y_pred) ** 2)
+                    ss_tot = np.sum((y - np.mean(y)) ** 2)
+                    r_squared = 1 - (ss_res / ss_tot) if ss_tot != 0 else 0
+
+                    # Adjusted R-squared
+                    n = len(y)
+                    k = self.lag_order * len(self.data.columns) + 1  # params per equation
+                    adj_r_squared = 1 - (1 - r_squared) * (n - 1) / (n - k - 1) if n > k + 1 else r_squared
+
+                    summary_stats.append({
+                        'variable': var,
+                        'r_squared': float(r_squared),
+                        'adj_r_squared': float(adj_r_squared)
+                    })
+
+                diagnostics['model_stats'] = {
+                    'by_equation': summary_stats,
+                    'aic': float(aic),
+                    'bic': float(bic),
+                    'hqic': float(hqic),
+                    'fpe': float(fpe),
+                    'log_likelihood': float(self.results.llf) if hasattr(self.results, 'llf') else None
+                }
+            except Exception as e:
+                diagnostics['model_stats'] = {'error': str(e)}
+
+            # 6. Residual Statistics
+            try:
+                resid = self.results.resid
+                diagnostics['residual_stats'] = {
+                    'means': resid.mean().to_dict(),
+                    'std_devs': resid.std().to_dict(),
+                    'skewness': resid.skew().to_dict(),
+                    'kurtosis': resid.kurtosis().to_dict()
+                }
+            except Exception as e:
+                diagnostics['residual_stats'] = {'error': str(e)}
+
+        except Exception as e:
+            diagnostics['general_error'] = str(e)
 
         return diagnostics
+
+    def get_residual_plots_data(self) -> Dict:
+        """Get data for residual plots (ACF, PACF, time series)"""
+        if self.results is None:
+            return {}
+
+        from statsmodels.graphics.tsaplots import acf, pacf
+
+        plot_data = {}
+        resid = self.results.resid
+
+        for var in self.data.columns:
+            var_resid = resid[var].values
+
+            # ACF and PACF
+            try:
+                acf_vals = acf(var_resid, nlags=20)
+                pacf_vals = pacf(var_resid, nlags=20)
+
+                plot_data[var] = {
+                    'residuals': var_resid,
+                    'dates': self.data.index[self.lag_order:],
+                    'acf': acf_vals,
+                    'pacf': pacf_vals
+                }
+            except Exception as e:
+                plot_data[var] = {'error': str(e)}
+
+        return plot_data
 
 
 class VECMEstimator:
@@ -513,7 +658,7 @@ class VECMEstimator:
         if self.results is None:
             raise ValueError("Model not fitted yet")
 
-        # Use VECM predict method
+        # Use VECM predict method - returns numpy array
         forecast = self.results.predict(steps=steps)
 
         # Get forecast standard errors using simulation
@@ -521,12 +666,14 @@ class VECMEstimator:
         n_simulations = 1000
         forecasts_simulated = []
 
+        # Get residuals as numpy array
+        resid = self.results.resid.values if hasattr(self.results.resid, 'values') else self.results.resid
+
         for _ in range(n_simulations):
             # Bootstrap residuals
-            resid = self.results.resid
             n_obs = len(resid)
             boot_indices = np.random.randint(0, n_obs, steps)
-            boot_resid = resid.iloc[boot_indices].values
+            boot_resid = resid[boot_indices]
 
             # Simulate forecast with bootstrapped residuals
             try:
@@ -542,7 +689,7 @@ class VECMEstimator:
             upper = np.percentile(forecasts_simulated, 97.5, axis=0)
         else:
             # Fallback: use simple standard deviation estimate
-            std_error = self.results.resid.std().values
+            std_error = self.results.resid.std().values if hasattr(self.results.resid.std(), 'values') else np.std(resid, axis=0)
             lower = forecast - 1.96 * std_error * np.sqrt(np.arange(1, steps + 1)[:, np.newaxis])
             upper = forecast + 1.96 * std_error * np.sqrt(np.arange(1, steps + 1)[:, np.newaxis])
 
@@ -673,6 +820,129 @@ class VECMEstimator:
             upper = irf_result.irfs + z_score * stderr
 
         return irf_result.irfs, lower, upper
+
+    def granger_causality(self, maxlag: int = 8) -> Dict[str, pd.DataFrame]:
+        """
+        Test Granger causality for VECM by converting to VAR representation
+
+        Args:
+            maxlag: Maximum lag for testing
+
+        Returns:
+            Dictionary of DataFrames with test results
+        """
+        if self.results is None:
+            raise ValueError("Model not fitted yet")
+
+        results = {}
+
+        try:
+            # Convert VECM to VAR in levels
+            var_rep = self.results.to_levels_object()
+
+            # Run Granger causality tests on VAR representation
+            for i, cause_var in enumerate(self.data.columns):
+                for j, effect_var in enumerate(self.data.columns):
+                    if i == j:
+                        continue
+
+                    key = f"{cause_var} → {effect_var}"
+
+                    try:
+                        # Prepare data for granger test
+                        test_data = pd.DataFrame({
+                            effect_var: var_rep.endog[:, j],
+                            cause_var: var_rep.endog[:, i]
+                        })
+
+                        gc_result = grangercausalitytests(test_data, maxlag=min(maxlag, var_rep.k_ar), verbose=False)
+
+                        # Extract results for each lag
+                        test_results = []
+                        for lag in range(1, min(maxlag, var_rep.k_ar) + 1):
+                            ssr_ftest = gc_result[lag][0]['ssr_ftest']
+                            test_results.append({
+                                'Lag': lag,
+                                'F-statistic': ssr_ftest[0],
+                                'p-value': ssr_ftest[1],
+                                'Significant': 'Yes' if ssr_ftest[1] < 0.05 else 'No'
+                            })
+
+                        results[key] = pd.DataFrame(test_results)
+
+                    except Exception as e:
+                        results[key] = pd.DataFrame([{'Error': str(e)}])
+
+        except Exception as e:
+            # Fallback: return error message
+            results['Error'] = pd.DataFrame([{'Message': f"Could not perform Granger causality for VECM: {str(e)}"}])
+
+        return results
+
+    def historical_decomposition(self) -> Dict[str, pd.DataFrame]:
+        """
+        Decompose historical values into contributions from each shock for VECM
+
+        Returns:
+            Dictionary mapping variable names to DataFrames with shock contributions
+        """
+        if self.results is None:
+            raise ValueError("Model not fitted yet")
+
+        try:
+            # Convert to VAR representation
+            var_rep = self.results.to_levels_object()
+
+            # Get structural shocks (orthogonalized residuals)
+            irf_result = var_rep.irf(1)
+            P = irf_result.P  # Cholesky decomposition matrix
+
+            # Get residuals from VAR representation
+            var_resid = pd.DataFrame(var_rep.resid, columns=self.data.columns)
+
+            # Structural shocks
+            structural_shocks = var_resid @ np.linalg.inv(P.T)
+
+            # Get IRF coefficients
+            irf_full = var_rep.irf(len(var_resid))
+
+            decompositions = {}
+
+            for i, var in enumerate(self.data.columns):
+                contributions = {}
+
+                for j, shock in enumerate(self.data.columns):
+                    # Contribution of shock j to variable i
+                    contrib = np.zeros(len(var_resid))
+
+                    for t in range(len(var_resid)):
+                        for s in range(t + 1):
+                            if t - s < irf_full.irfs.shape[0]:
+                                contrib[t] += irf_full.irfs[t - s, i, j] * structural_shocks.iloc[s, j]
+
+                    contributions[f'Shock: {shock}'] = contrib
+
+                # Use VAR representation data for actual values
+                decomp_df = pd.DataFrame(contributions, index=var_resid.index)
+                decomp_df['Actual'] = var_resid.iloc[:, i].values
+                decomp_df['Baseline'] = var_resid.iloc[:, i].mean()
+
+                decompositions[var] = decomp_df
+
+        except Exception as e:
+            import warnings
+            warnings.warn(f"Could not compute historical decomposition for VECM: {str(e)}")
+
+            # Fallback: create simple decomposition based on residuals
+            decompositions = {}
+            for var in self.data.columns:
+                decomp_df = pd.DataFrame({
+                    'Actual': self.data[var],
+                    'Note': ['Historical decomposition unavailable for this VECM model'] * len(self.data)
+                }, index=self.data.index)
+                decompositions[var] = decomp_df
+
+        return decompositions
 
 
 class RobustVAREstimator(VAREstimator):

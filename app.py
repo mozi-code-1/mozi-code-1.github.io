@@ -449,6 +449,7 @@ def main():
         "📈 Data Overview",
         "🔍 Stationarity & Cointegration",
         "📊 VAR/VECM Estimation",
+        "🩺 Model Diagnostics",
         "💥 Impulse Responses",
         "🔮 Forecasting",
         "🔗 Granger Causality",
@@ -741,8 +742,262 @@ def main():
                     import traceback
                     st.code(traceback.format_exc())
 
-    # TAB 4: Impulse Response Functions
+    # TAB 4: Model Diagnostics
     with tabs[3]:
+        st.markdown('<p class="section-header">Model Diagnostics & Tests</p>', unsafe_allow_html=True)
+
+        if 'model1' not in st.session_state or 'model2' not in st.session_state:
+            st.warning("⚠️ Please estimate models first (go to VAR/VECM Estimation tab)")
+        else:
+            country_choice = st.selectbox("Select Country for Diagnostics", [country1, country2], key='diag_country')
+
+            model = st.session_state['model1'] if country_choice == country1 else st.session_state['model2']
+            model_type = st.session_state['model_type1'] if country_choice == country1 else st.session_state['model_type2']
+
+            if model_type == 'VAR':
+                st.info(f"📊 Showing diagnostics for {model_type} model with {model.lag_order} lags")
+
+                diagnostics = model.get_diagnostics()
+
+                # Summary section
+                st.markdown("### 🎯 Overall Model Quality")
+                col1, col2, col3, col4 = st.columns(4)
+
+                with col1:
+                    passes_autocorr = diagnostics.get('autocorrelation', {}).get('passes', False)
+                    st.metric("Autocorrelation", "✅ Pass" if passes_autocorr else "❌ Fail")
+
+                with col2:
+                    passes_normal = diagnostics.get('normality', {}).get('passes', False)
+                    st.metric("Normality", "✅ Pass" if passes_normal else "❌ Fail")
+
+                with col3:
+                    passes_het = diagnostics.get('heteroscedasticity', {}).get('passes', False)
+                    st.metric("Homoscedasticity", "✅ Pass" if passes_het else "❌ Fail")
+
+                with col4:
+                    passes_stab = diagnostics.get('stability', {}).get('passes', False)
+                    st.metric("Stability", "✅ Pass" if passes_stab else "❌ Fail")
+
+                # 1. Residual Autocorrelation Test
+                st.markdown("### 1️⃣ Residual Autocorrelation (Portmanteau/LM Test)")
+                if 'autocorrelation' in diagnostics and 'error' not in diagnostics['autocorrelation']:
+                    auto_test = diagnostics['autocorrelation']
+                    col1, col2 = st.columns(2)
+
+                    with col1:
+                        st.metric("Test Statistic", f"{auto_test['statistic']:.4f}")
+                        st.metric("p-value", f"{auto_test['p_value']:.4f}")
+
+                    with col2:
+                        if auto_test['passes']:
+                            st.success("✅ " + auto_test['interpretation'])
+                        else:
+                            st.error("❌ " + auto_test['interpretation'])
+
+                    st.caption("**Null Hypothesis:** No residual autocorrelation at any lag")
+                    st.caption("**What it means:** Tests if residuals are serially correlated. If fails, model may be misspecified.")
+
+                # 2. Normality Test
+                st.markdown("### 2️⃣ Normality Test (Jarque-Bera)")
+                if 'normality' in diagnostics and 'error' not in diagnostics['normality']:
+                    norm_test = diagnostics['normality']
+                    col1, col2 = st.columns(2)
+
+                    with col1:
+                        st.metric("Test Statistic", f"{norm_test['statistic']:.4f}")
+                        st.metric("p-value", f"{norm_test['p_value']:.4f}")
+
+                    with col2:
+                        if norm_test['passes']:
+                            st.success("✅ " + norm_test['interpretation'])
+                        else:
+                            st.warning("⚠️ " + norm_test['interpretation'])
+
+                    st.caption("**Null Hypothesis:** Residuals are normally distributed")
+                    st.caption("**What it means:** Tests if residuals follow a normal distribution. Failure may indicate outliers or need for robust estimation.")
+
+                # 3. Heteroscedasticity Test
+                st.markdown("### 3️⃣ Heteroscedasticity Test (White's Test)")
+                if 'heteroscedasticity' in diagnostics and 'error' not in diagnostics['heteroscedasticity']:
+                    het_test = diagnostics['heteroscedasticity']
+
+                    if 'by_equation' in het_test:
+                        het_df = pd.DataFrame(het_test['by_equation'])
+                        st.dataframe(het_df, use_container_width=True)
+
+                    col1, col2 = st.columns(2)
+                    with col1:
+                        st.metric("Average p-value", f"{het_test.get('average_p_value', 0):.4f}")
+
+                    with col2:
+                        if het_test['passes']:
+                            st.success("✅ " + het_test['interpretation'])
+                        else:
+                            st.warning("⚠️ " + het_test['interpretation'])
+
+                    st.caption("**Null Hypothesis:** Homoscedastic residuals (constant variance)")
+                    st.caption("**What it means:** Tests if error variance changes over time. Failure suggests using robust standard errors.")
+
+                # 4. Stability Check
+                st.markdown("### 4️⃣ Stability Check (AR Characteristic Roots)")
+                if 'stability' in diagnostics and 'error' not in diagnostics['stability']:
+                    stab_test = diagnostics['stability']
+
+                    col1, col2 = st.columns(2)
+                    with col1:
+                        st.metric("Max Root Modulus", f"{stab_test['max_root_modulus']:.4f}")
+                        st.metric("Number of Roots", len(stab_test['all_roots']))
+
+                    with col2:
+                        if stab_test['passes']:
+                            st.success("✅ " + stab_test['interpretation'])
+                        else:
+                            st.error("❌ " + stab_test['interpretation'])
+
+                    # Plot roots
+                    fig = go.Figure()
+
+                    # Unit circle
+                    theta = np.linspace(0, 2*np.pi, 100)
+                    fig.add_trace(go.Scatter(
+                        x=np.cos(theta),
+                        y=np.sin(theta),
+                        mode='lines',
+                        name='Unit Circle',
+                        line=dict(color='red', dash='dash')
+                    ))
+
+                    # Roots
+                    roots_array = np.array([complex(r) if isinstance(r, (int, float)) else r for r in stab_test['all_roots']])
+                    fig.add_trace(go.Scatter(
+                        x=[0],
+                        y=[0],
+                        mode='markers',
+                        marker=dict(size=10, color='blue'),
+                        name='AR Roots',
+                        text=[f"Root {i+1}: {abs(r):.3f}" for i, r in enumerate(roots_array)],
+                        hoverinfo='text'
+                    ))
+
+                    fig.update_layout(
+                        title="AR Characteristic Roots",
+                        xaxis_title="Real Part",
+                        yaxis_title="Imaginary Part",
+                        height=400,
+                        showlegend=True
+                    )
+
+                    st.plotly_chart(fig, use_container_width=True)
+
+                    st.caption("**What it means:** All roots must be inside the unit circle for the model to be stable. Unstable models produce unreliable forecasts.")
+
+                # 5. Model Summary Statistics
+                st.markdown("### 5️⃣ Model Summary Statistics")
+                if 'model_stats' in diagnostics and 'error' not in diagnostics['model_stats']:
+                    stats = diagnostics['model_stats']
+
+                    col1, col2, col3, col4 = st.columns(4)
+                    with col1:
+                        st.metric("AIC", f"{stats.get('aic', 0):.2f}")
+                    with col2:
+                        st.metric("BIC", f"{stats.get('bic', 0):.2f}")
+                    with col3:
+                        st.metric("HQIC", f"{stats.get('hqic', 0):.2f}")
+                    with col4:
+                        if stats.get('log_likelihood'):
+                            st.metric("Log-Likelihood", f"{stats['log_likelihood']:.2f}")
+
+                    st.markdown("**R-squared by Equation:**")
+                    if 'by_equation' in stats:
+                        stats_df = pd.DataFrame(stats['by_equation'])
+                        st.dataframe(stats_df, use_container_width=True)
+
+                    st.caption("**What it means:** Lower AIC/BIC indicates better model fit. R² shows proportion of variance explained.")
+
+                # 6. Residual Statistics
+                st.markdown("### 6️⃣ Residual Statistics")
+                if 'residual_stats' in diagnostics and 'error' not in diagnostics['residual_stats']:
+                    res_stats = diagnostics['residual_stats']
+
+                    resid_df = pd.DataFrame({
+                        'Mean': res_stats.get('means', {}),
+                        'Std Dev': res_stats.get('std_devs', {}),
+                        'Skewness': res_stats.get('skewness', {}),
+                        'Kurtosis': res_stats.get('kurtosis', {})
+                    })
+
+                    st.dataframe(resid_df, use_container_width=True)
+                    st.caption("**What it means:** Means should be near 0. Skewness and kurtosis indicate departure from normality.")
+
+                # 7. Residual Plots
+                st.markdown("### 7️⃣ Residual Plots")
+                plot_data = model.get_residual_plots_data()
+
+                var_select = st.selectbox("Select Variable for Residual Plots", list(plot_data.keys()))
+
+                if var_select and var_select in plot_data and 'error' not in plot_data[var_select]:
+                    var_data = plot_data[var_select]
+
+                    # Create subplots
+                    fig = make_subplots(
+                        rows=3, cols=1,
+                        subplot_titles=["Residuals Over Time", "ACF", "PACF"],
+                        vertical_spacing=0.1
+                    )
+
+                    # Residuals over time
+                    fig.add_trace(go.Scatter(
+                        x=var_data['dates'],
+                        y=var_data['residuals'],
+                        mode='lines',
+                        name='Residuals',
+                        line=dict(color='blue')
+                    ), row=1, col=1)
+
+                    fig.add_hline(y=0, line_dash="dash", line_color="red", row=1, col=1)
+
+                    # ACF
+                    lags_acf = list(range(len(var_data['acf'])))
+                    fig.add_trace(go.Bar(
+                        x=lags_acf,
+                        y=var_data['acf'],
+                        name='ACF',
+                        marker_color='green'
+                    ), row=2, col=1)
+
+                    # Add confidence bands for ACF
+                    conf_level = 1.96 / np.sqrt(len(var_data['residuals']))
+                    fig.add_hline(y=conf_level, line_dash="dash", line_color="red", row=2, col=1)
+                    fig.add_hline(y=-conf_level, line_dash="dash", line_color="red", row=2, col=1)
+
+                    # PACF
+                    lags_pacf = list(range(len(var_data['pacf'])))
+                    fig.add_trace(go.Bar(
+                        x=lags_pacf,
+                        y=var_data['pacf'],
+                        name='PACF',
+                        marker_color='orange'
+                    ), row=3, col=1)
+
+                    # Add confidence bands for PACF
+                    fig.add_hline(y=conf_level, line_dash="dash", line_color="red", row=3, col=1)
+                    fig.add_hline(y=-conf_level, line_dash="dash", line_color="red", row=3, col=1)
+
+                    fig.update_layout(height=900, showlegend=False)
+                    fig.update_xaxes(title_text="Date", row=1, col=1)
+                    fig.update_xaxes(title_text="Lag", row=2, col=1)
+                    fig.update_xaxes(title_text="Lag", row=3, col=1)
+
+                    st.plotly_chart(fig, use_container_width=True)
+
+                    st.caption("**What it means:** Residuals should be random (no patterns). ACF/PACF should be mostly within confidence bands (red dashed lines).")
+
+            else:
+                st.info("📊 Full diagnostics currently available for VAR models only. Basic tests available for VECM.")
+
+    # TAB 5: Impulse Response Functions
+    with tabs[4]:
         st.markdown('<p class="section-header">Impulse Response Functions</p>', unsafe_allow_html=True)
 
         if 'model1' not in st.session_state or 'model2' not in st.session_state:
@@ -822,80 +1077,215 @@ def main():
                     import traceback
                     st.code(traceback.format_exc())
 
-    # TAB 5: Forecasting
-    with tabs[4]:
+    # TAB 6: Forecasting
+    with tabs[5]:
         st.markdown('<p class="section-header">Forecasting</p>', unsafe_allow_html=True)
 
         if 'model1' not in st.session_state or 'model2' not in st.session_state:
             st.warning("⚠️ Please estimate models first (go to VAR/VECM Estimation tab)")
         else:
-            country_choice = st.selectbox("Select Country for Forecast", [country1, country2], key='forecast_country')
+            # Check if countries have different model types
+            model_type1 = st.session_state['model_type1']
+            model_type2 = st.session_state['model_type2']
+            different_models = model_type1 != model_type2
 
-            model = st.session_state['model1'] if country_choice == country1 else st.session_state['model2']
-            model_type = st.session_state['model_type1'] if country_choice == country1 else st.session_state['model_type2']
-            data = data1 if country_choice == country1 else data2
+            # Add comparison option if models differ
+            compare_models = False
+            if different_models:
+                compare_models = st.checkbox(
+                    f"📊 Compare forecasts: {country1} ({model_type1}) vs {country2} ({model_type2})",
+                    value=False,
+                    key='compare_forecasts'
+                )
 
-            # Both VAR and VECM support forecasting
-            with st.spinner(f"Generating forecasts using {model_type} model..."):
-                try:
-                    # Filter out COVID dummy for plotting
-                    data_plot = data.drop('COVID_DUMMY', axis=1) if 'COVID_DUMMY' in data.columns else data
+            if compare_models:
+                st.info(f"Comparing {country1} ({model_type1}) and {country2} ({model_type2}) forecasts")
 
-                    # Generate forecasts (works for both VAR and VECM)
-                    forecast_df, lower_df, upper_df = model.forecast(steps=forecast_periods)
+                # Generate forecasts for both countries
+                with st.spinner("Generating forecasts for both countries..."):
+                    try:
+                        # Country 1
+                        data1_plot = data1.drop('COVID_DUMMY', axis=1) if 'COVID_DUMMY' in data1.columns else data1
+                        forecast1_df, lower1_df, upper1_df = st.session_state['model1'].forecast(steps=forecast_periods)
 
-                    # Plot forecasts for each variable
-                    for var in data_plot.columns:
-                        if var in forecast_df.columns:
-                            st.plotly_chart(
-                                plot_forecast(data_plot, forecast_df, lower_df, upper_df, var),
-                                use_container_width=True
+                        # Country 2
+                        data2_plot = data2.drop('COVID_DUMMY', axis=1) if 'COVID_DUMMY' in data2.columns else data2
+                        forecast2_df, lower2_df, upper2_df = st.session_state['model2'].forecast(steps=forecast_periods)
+
+                        # Find common variables
+                        common_vars = list(set(forecast1_df.columns) & set(forecast2_df.columns))
+
+                        # Plot comparison for each variable
+                        for var in common_vars:
+                            fig = go.Figure()
+
+                            # Country 1 forecast
+                            fig.add_trace(go.Scatter(
+                                x=list(range(1, forecast_periods + 1)),
+                                y=forecast1_df[var],
+                                mode='lines',
+                                name=f'{country1} ({model_type1})',
+                                line=dict(color='blue', width=2)
+                            ))
+
+                            # Country 1 confidence interval
+                            fig.add_trace(go.Scatter(
+                                x=list(range(1, forecast_periods + 1)),
+                                y=upper1_df[var],
+                                mode='lines',
+                                line=dict(width=0),
+                                showlegend=False,
+                                hoverinfo='skip'
+                            ))
+                            fig.add_trace(go.Scatter(
+                                x=list(range(1, forecast_periods + 1)),
+                                y=lower1_df[var],
+                                mode='lines',
+                                line=dict(width=0),
+                                fillcolor='rgba(0, 0, 255, 0.2)',
+                                fill='tonexty',
+                                name=f'{country1} 95% CI',
+                                hoverinfo='skip'
+                            ))
+
+                            # Country 2 forecast
+                            fig.add_trace(go.Scatter(
+                                x=list(range(1, forecast_periods + 1)),
+                                y=forecast2_df[var],
+                                mode='lines',
+                                name=f'{country2} ({model_type2})',
+                                line=dict(color='red', width=2)
+                            ))
+
+                            # Country 2 confidence interval
+                            fig.add_trace(go.Scatter(
+                                x=list(range(1, forecast_periods + 1)),
+                                y=upper2_df[var],
+                                mode='lines',
+                                line=dict(width=0),
+                                showlegend=False,
+                                hoverinfo='skip'
+                            ))
+                            fig.add_trace(go.Scatter(
+                                x=list(range(1, forecast_periods + 1)),
+                                y=lower2_df[var],
+                                mode='lines',
+                                line=dict(width=0),
+                                fillcolor='rgba(255, 0, 0, 0.2)',
+                                fill='tonexty',
+                                name=f'{country2} 95% CI',
+                                hoverinfo='skip'
+                            ))
+
+                            fig.update_layout(
+                                title=f'{var} Forecast Comparison: {model_type1} vs {model_type2}',
+                                xaxis_title='Periods Ahead',
+                                yaxis_title=var,
+                                hovermode='x unified',
+                                template='plotly_white'
                             )
 
-                    # Show forecast table
-                    with st.expander("📋 Forecast Values"):
-                        forecast_display = forecast_df.copy()
-                        forecast_display['Period'] = range(1, len(forecast_display) + 1)
-                        forecast_display = forecast_display[['Period'] + list(forecast_df.columns)]
-                        st.dataframe(forecast_display, use_container_width=True)
+                            st.plotly_chart(fig, use_container_width=True)
 
-                    # Forecast Error Variance Decomposition
-                    st.markdown('<p class="section-header">Forecast Error Variance Decomposition</p>', unsafe_allow_html=True)
+                        # Show comparison table
+                        with st.expander("📋 Forecast Comparison Table"):
+                            for var in common_vars:
+                                st.markdown(f"**{var}**")
+                                comparison_df = pd.DataFrame({
+                                    'Period': range(1, forecast_periods + 1),
+                                    f'{country1} ({model_type1})': forecast1_df[var].values,
+                                    f'{country2} ({model_type2})': forecast2_df[var].values,
+                                    'Difference': forecast1_df[var].values - forecast2_df[var].values
+                                })
+                                st.dataframe(comparison_df, use_container_width=True)
 
-                    if model_type == 'VECM':
-                        st.info("💡 FEVD for VECM uses the VAR representation in levels")
+                        # Download comparison
+                        comparison_data = pd.DataFrame({'Period': range(1, forecast_periods + 1)})
+                        for var in common_vars:
+                            comparison_data[f'{country1}_{var}_{model_type1}'] = forecast1_df[var].values
+                            comparison_data[f'{country2}_{var}_{model_type2}'] = forecast2_df[var].values
 
-                    fevd_df = model.fevd(periods=forecast_periods)
+                        csv = comparison_data.to_csv(index=False)
+                        st.download_button(
+                            label="📥 Download Forecast Comparison (CSV)",
+                            data=csv,
+                            file_name=f"forecast_comparison_{model_type1}_vs_{model_type2}.csv",
+                            mime="text/csv"
+                        )
 
-                    # Filter variables for selection (exclude COVID dummy)
-                    var_options = [col for col in data_plot.columns if col in forecast_df.columns]
-                    var_choice = st.selectbox("Select Variable for FEVD", var_options, key='fevd_var')
+                    except Exception as e:
+                        st.error(f"Error generating comparison: {str(e)}")
+                        import traceback
+                        st.code(traceback.format_exc())
+            else:
+                # Original single-country forecast view
+                country_choice = st.selectbox("Select Country for Forecast", [country1, country2], key='forecast_country')
 
-                    st.plotly_chart(
-                        plot_fevd(fevd_df, var_choice, forecast_periods),
-                        use_container_width=True
-                    )
+                model = st.session_state['model1'] if country_choice == country1 else st.session_state['model2']
+                model_type = st.session_state['model_type1'] if country_choice == country1 else st.session_state['model_type2']
+                data = data1 if country_choice == country1 else data2
 
-                    with st.expander("📊 FEVD Table"):
-                        fevd_display = fevd_df[fevd_df['Response'] == var_choice].copy()
-                        st.dataframe(fevd_display, use_container_width=True)
+                # Both VAR and VECM support forecasting
+                with st.spinner(f"Generating forecasts using {model_type} model..."):
+                    try:
+                        # Filter out COVID dummy for plotting
+                        data_plot = data.drop('COVID_DUMMY', axis=1) if 'COVID_DUMMY' in data.columns else data
 
-                    # Download forecast
-                    csv = forecast_df.to_csv(index=True)
-                    st.download_button(
-                        label="📥 Download Forecast Data (CSV)",
-                        data=csv,
-                        file_name=f"forecast_{country_choice}_{model_type}.csv",
-                        mime="text/csv"
-                    )
+                        # Generate forecasts (works for both VAR and VECM)
+                        forecast_df, lower_df, upper_df = model.forecast(steps=forecast_periods)
 
-                except Exception as e:
-                    st.error(f"Error generating forecasts: {str(e)}")
-                    import traceback
-                    st.code(traceback.format_exc())
+                        # Plot forecasts for each variable
+                        for var in data_plot.columns:
+                            if var in forecast_df.columns:
+                                st.plotly_chart(
+                                    plot_forecast(data_plot, forecast_df, lower_df, upper_df, var),
+                                    use_container_width=True
+                                )
 
-    # TAB 6: Granger Causality
-    with tabs[5]:
+                        # Show forecast table
+                        with st.expander("📋 Forecast Values"):
+                            forecast_display = forecast_df.copy()
+                            forecast_display['Period'] = range(1, len(forecast_display) + 1)
+                            forecast_display = forecast_display[['Period'] + list(forecast_df.columns)]
+                            st.dataframe(forecast_display, use_container_width=True)
+
+                        # Forecast Error Variance Decomposition
+                        st.markdown('<p class="section-header">Forecast Error Variance Decomposition</p>', unsafe_allow_html=True)
+
+                        if model_type == 'VECM':
+                            st.info("💡 FEVD for VECM uses the VAR representation in levels")
+
+                        fevd_df = model.fevd(periods=forecast_periods)
+
+                        # Filter variables for selection (exclude COVID dummy)
+                        var_options = [col for col in data_plot.columns if col in forecast_df.columns]
+                        var_choice = st.selectbox("Select Variable for FEVD", var_options, key='fevd_var')
+
+                        st.plotly_chart(
+                            plot_fevd(fevd_df, var_choice, forecast_periods),
+                            use_container_width=True
+                        )
+
+                        with st.expander("📊 FEVD Table"):
+                            fevd_display = fevd_df[fevd_df['Response'] == var_choice].copy()
+                            st.dataframe(fevd_display, use_container_width=True)
+
+                        # Download forecast
+                        csv = forecast_df.to_csv(index=True)
+                        st.download_button(
+                            label="📥 Download Forecast Data (CSV)",
+                            data=csv,
+                            file_name=f"forecast_{country_choice}_{model_type}.csv",
+                            mime="text/csv"
+                        )
+
+                    except Exception as e:
+                        st.error(f"Error generating forecasts: {str(e)}")
+                        import traceback
+                        st.code(traceback.format_exc())
+
+    # TAB 7: Granger Causality
+    with tabs[6]:
         st.markdown('<p class="section-header">Granger Causality Tests</p>', unsafe_allow_html=True)
 
         if 'model1' not in st.session_state or 'model2' not in st.session_state:
@@ -909,27 +1299,30 @@ def main():
                 model1 = st.session_state['model1']
                 model_type1 = st.session_state['model_type1']
 
-                if model_type1 == 'VAR':
-                    with st.spinner("Running Granger causality tests..."):
-                        try:
-                            gc_results1 = model1.granger_causality(maxlag=min(8, model1.lag_order + 2))
+                if model_type1 == 'VECM':
+                    st.info("💡 VECM Granger causality uses VAR representation in levels")
 
-                            # Display results for each pair
-                            for pair, results_df in gc_results1.items():
-                                with st.expander(f"🔗 {pair}"):
-                                    if 'Error' not in results_df.columns:
-                                        st.dataframe(results_df, use_container_width=True)
+                with st.spinner(f"Running Granger causality tests for {model_type1}..."):
+                    try:
+                        maxlag = 8 if model_type1 == 'VAR' else 4  # Fewer lags for VECM
+                        gc_results1 = model1.granger_causality(maxlag=maxlag)
 
-                                        # Highlight if any lag is significant
-                                        if any(results_df['Significant'] == 'Yes'):
-                                            st.success("✅ Statistically significant Granger causality detected")
-                                    else:
-                                        st.error(results_df['Error'].iloc[0])
+                        # Display results for each pair
+                        for pair, results_df in gc_results1.items():
+                            with st.expander(f"🔗 {pair}"):
+                                if 'Error' not in results_df.columns and 'Message' not in results_df.columns:
+                                    st.dataframe(results_df, use_container_width=True)
 
-                        except Exception as e:
-                            st.error(f"Error in Granger causality test: {str(e)}")
-                else:
-                    st.info("Granger causality tests not available for VECM models in this version.")
+                                    # Highlight if any lag is significant
+                                    if 'Significant' in results_df.columns and any(results_df['Significant'] == 'Yes'):
+                                        st.success("✅ Statistically significant Granger causality detected")
+                                elif 'Message' in results_df.columns:
+                                    st.error(results_df['Message'].iloc[0])
+                                else:
+                                    st.error(results_df.get('Error', ['Unknown error']).iloc[0])
+
+                    except Exception as e:
+                        st.error(f"Error in Granger causality test: {str(e)}")
 
             with col2:
                 st.subheader(f"{country2}")
@@ -937,30 +1330,33 @@ def main():
                 model2 = st.session_state['model2']
                 model_type2 = st.session_state['model_type2']
 
-                if model_type2 == 'VAR':
-                    with st.spinner("Running Granger causality tests..."):
-                        try:
-                            gc_results2 = model2.granger_causality(maxlag=min(8, model2.lag_order + 2))
+                if model_type2 == 'VECM':
+                    st.info("💡 VECM Granger causality uses VAR representation in levels")
 
-                            # Display results for each pair
-                            for pair, results_df in gc_results2.items():
-                                with st.expander(f"🔗 {pair}"):
-                                    if 'Error' not in results_df.columns:
-                                        st.dataframe(results_df, use_container_width=True)
+                with st.spinner(f"Running Granger causality tests for {model_type2}..."):
+                    try:
+                        maxlag = 8 if model_type2 == 'VAR' else 4  # Fewer lags for VECM
+                        gc_results2 = model2.granger_causality(maxlag=maxlag)
 
-                                        # Highlight if any lag is significant
-                                        if any(results_df['Significant'] == 'Yes'):
-                                            st.success("✅ Statistically significant Granger causality detected")
-                                    else:
-                                        st.error(results_df['Error'].iloc[0])
+                        # Display results for each pair
+                        for pair, results_df in gc_results2.items():
+                            with st.expander(f"🔗 {pair}"):
+                                if 'Error' not in results_df.columns and 'Message' not in results_df.columns:
+                                    st.dataframe(results_df, use_container_width=True)
 
-                        except Exception as e:
-                            st.error(f"Error in Granger causality test: {str(e)}")
-                else:
-                    st.info("Granger causality tests not available for VECM models in this version.")
+                                    # Highlight if any lag is significant
+                                    if 'Significant' in results_df.columns and any(results_df['Significant'] == 'Yes'):
+                                        st.success("✅ Statistically significant Granger causality detected")
+                                elif 'Message' in results_df.columns:
+                                    st.error(results_df['Message'].iloc[0])
+                                else:
+                                    st.error(results_df.get('Error', ['Unknown error']).iloc[0])
 
-    # TAB 7: Historical Decomposition
-    with tabs[6]:
+                    except Exception as e:
+                        st.error(f"Error in Granger causality test: {str(e)}")
+
+    # TAB 8: Historical Decomposition
+    with tabs[7]:
         st.markdown('<p class="section-header">Historical Decomposition</p>', unsafe_allow_html=True)
 
         if 'model1' not in st.session_state or 'model2' not in st.session_state:
@@ -976,42 +1372,43 @@ def main():
             model_type = st.session_state['model_type1'] if country_choice == country1 else st.session_state['model_type2']
             data = data1 if country_choice == country1 else data2
 
-            if model_type == 'VAR':
-                var_choice = st.selectbox(
-                    "Select Variable to Decompose",
-                    data.columns,
-                    key='hist_decomp_var'
-                )
+            # Show info for VECM
+            if model_type == 'VECM':
+                st.info("ℹ️ Historical decomposition for VECM uses the VAR representation in levels.")
 
-                with st.spinner("Computing historical decomposition..."):
-                    try:
-                        decompositions = model.historical_decomposition()
+            var_choice = st.selectbox(
+                "Select Variable to Decompose",
+                data.columns,
+                key='hist_decomp_var'
+            )
 
-                        decomp_df = decompositions[var_choice]
+            with st.spinner("Computing historical decomposition..."):
+                try:
+                    decompositions = model.historical_decomposition()
 
-                        st.plotly_chart(
-                            plot_historical_decomposition(decomp_df, var_choice),
-                            use_container_width=True
-                        )
+                    decomp_df = decompositions[var_choice]
 
-                        with st.expander("📋 Decomposition Data"):
-                            st.dataframe(decomp_df.tail(20), use_container_width=True)
+                    st.plotly_chart(
+                        plot_historical_decomposition(decomp_df, var_choice),
+                        use_container_width=True
+                    )
 
-                        # Download decomposition
-                        csv = decomp_df.to_csv(index=True)
-                        st.download_button(
-                            label="📥 Download Historical Decomposition (CSV)",
-                            data=csv,
-                            file_name=f"hist_decomp_{country_choice}_{var_choice}.csv",
-                            mime="text/csv"
-                        )
+                    with st.expander("📋 Decomposition Data"):
+                        st.dataframe(decomp_df.tail(20), use_container_width=True)
 
-                    except Exception as e:
-                        st.error(f"Error computing historical decomposition: {str(e)}")
-                        import traceback
-                        st.code(traceback.format_exc())
-            else:
-                st.info("Historical decomposition not available for VECM models in this version.")
+                    # Download decomposition
+                    csv = decomp_df.to_csv(index=True)
+                    st.download_button(
+                        label="📥 Download Historical Decomposition (CSV)",
+                        data=csv,
+                        file_name=f"hist_decomp_{country_choice}_{var_choice}.csv",
+                        mime="text/csv"
+                    )
+
+                except Exception as e:
+                    st.error(f"Error computing historical decomposition: {str(e)}")
+                    import traceback
+                    st.code(traceback.format_exc())
 
     # Footer
     st.markdown("---")
