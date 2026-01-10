@@ -771,53 +771,56 @@ def main():
             model = st.session_state['model1'] if country_choice == country1 else st.session_state['model2']
             model_type = st.session_state['model_type1'] if country_choice == country1 else st.session_state['model_type2']
 
-            if model_type == 'VAR':
-                with st.spinner("Computing impulse responses..."):
-                    try:
-                        alpha = (100 - confidence_level) / 100
+            # Both VAR and VECM support IRFs
+            with st.spinner(f"Computing impulse responses using {model_type} model..."):
+                try:
+                    alpha = (100 - confidence_level) / 100
 
-                        id_scheme = 'cholesky' if 'Cholesky' in identification else 'long_run'
+                    id_scheme = 'cholesky' if 'Cholesky' in identification else 'long_run'
 
-                        irfs, lower, upper = model.irf_with_confidence_bands(
-                            periods=irf_periods,
-                            alpha=alpha,
-                            identification=id_scheme,
-                            n_bootstrap=500
-                        )
+                    if model_type == 'VECM':
+                        st.info("💡 VECM IRFs show long-run effects including cointegration adjustments")
+                        # VECM only supports Cholesky for now
+                        id_scheme = 'cholesky'
 
-                        # Plot specific IRF
+                    irfs, lower, upper = model.irf_with_confidence_bands(
+                        periods=irf_periods,
+                        alpha=alpha,
+                        identification=id_scheme,
+                        n_bootstrap=500 if model_type == 'VAR' else 200  # Fewer for VECM (slower)
+                    )
+
+                    # Plot specific IRF
+                    st.plotly_chart(
+                        plot_irf(irfs, lower, upper, var_names, shock_var, response_var, irf_periods),
+                        use_container_width=True
+                    )
+
+                    # Show all IRFs
+                    with st.expander("📊 View All IRFs"):
                         st.plotly_chart(
-                            plot_irf(irfs, lower, upper, var_names, shock_var, response_var, irf_periods),
+                            plot_all_irfs(irfs, var_names, irf_periods),
                             use_container_width=True
                         )
 
-                        # Show all IRFs
-                        with st.expander("📊 View All IRFs"):
-                            st.plotly_chart(
-                                plot_all_irfs(irfs, var_names, irf_periods),
-                                use_container_width=True
-                            )
+                    # Download IRF data
+                    irf_data = pd.DataFrame(
+                        irfs[:, var_names.index(response_var), var_names.index(shock_var)],
+                        columns=[f'{response_var} response to {shock_var}']
+                    )
 
-                        # Download IRF data
-                        irf_data = pd.DataFrame(
-                            irfs[:, var_names.index(response_var), var_names.index(shock_var)],
-                            columns=[f'{response_var} response to {shock_var}']
-                        )
+                    csv = irf_data.to_csv(index=True)
+                    st.download_button(
+                        label="📥 Download IRF Data (CSV)",
+                        data=csv,
+                        file_name=f"irf_{country_choice}_{model_type}_{shock_var}_{response_var}.csv",
+                        mime="text/csv"
+                    )
 
-                        csv = irf_data.to_csv(index=True)
-                        st.download_button(
-                            label="📥 Download IRF Data (CSV)",
-                            data=csv,
-                            file_name=f"irf_{country_choice}_{shock_var}_{response_var}.csv",
-                            mime="text/csv"
-                        )
-
-                    except Exception as e:
-                        st.error(f"Error computing IRFs: {str(e)}")
-                        import traceback
-                        st.code(traceback.format_exc())
-            else:
-                st.info("IRF functionality for VECM models coming soon. Currently only available for VAR models.")
+                except Exception as e:
+                    st.error(f"Error computing IRFs: {str(e)}")
+                    import traceback
+                    st.code(traceback.format_exc())
 
     # TAB 5: Forecasting
     with tabs[4]:
@@ -832,56 +835,64 @@ def main():
             model_type = st.session_state['model_type1'] if country_choice == country1 else st.session_state['model_type2']
             data = data1 if country_choice == country1 else data2
 
-            if model_type == 'VAR':
-                with st.spinner("Generating forecasts..."):
-                    try:
-                        forecast_df, lower_df, upper_df = model.forecast(steps=forecast_periods)
+            # Both VAR and VECM support forecasting
+            with st.spinner(f"Generating forecasts using {model_type} model..."):
+                try:
+                    # Filter out COVID dummy for plotting
+                    data_plot = data.drop('COVID_DUMMY', axis=1) if 'COVID_DUMMY' in data.columns else data
 
-                        # Plot forecasts for each variable
-                        for var in data.columns:
+                    # Generate forecasts (works for both VAR and VECM)
+                    forecast_df, lower_df, upper_df = model.forecast(steps=forecast_periods)
+
+                    # Plot forecasts for each variable
+                    for var in data_plot.columns:
+                        if var in forecast_df.columns:
                             st.plotly_chart(
-                                plot_forecast(data, forecast_df, lower_df, upper_df, var),
+                                plot_forecast(data_plot, forecast_df, lower_df, upper_df, var),
                                 use_container_width=True
                             )
 
-                        # Show forecast table
-                        with st.expander("📋 Forecast Values"):
-                            forecast_display = forecast_df.copy()
-                            forecast_display['Period'] = range(1, len(forecast_display) + 1)
-                            forecast_display = forecast_display[['Period'] + list(data.columns)]
-                            st.dataframe(forecast_display, use_container_width=True)
+                    # Show forecast table
+                    with st.expander("📋 Forecast Values"):
+                        forecast_display = forecast_df.copy()
+                        forecast_display['Period'] = range(1, len(forecast_display) + 1)
+                        forecast_display = forecast_display[['Period'] + list(forecast_df.columns)]
+                        st.dataframe(forecast_display, use_container_width=True)
 
-                        # Forecast Error Variance Decomposition
-                        st.markdown('<p class="section-header">Forecast Error Variance Decomposition</p>', unsafe_allow_html=True)
+                    # Forecast Error Variance Decomposition
+                    st.markdown('<p class="section-header">Forecast Error Variance Decomposition</p>', unsafe_allow_html=True)
 
-                        fevd_df = model.fevd(periods=forecast_periods)
+                    if model_type == 'VECM':
+                        st.info("💡 FEVD for VECM uses the VAR representation in levels")
 
-                        var_choice = st.selectbox("Select Variable for FEVD", data.columns, key='fevd_var')
+                    fevd_df = model.fevd(periods=forecast_periods)
 
-                        st.plotly_chart(
-                            plot_fevd(fevd_df, var_choice, forecast_periods),
-                            use_container_width=True
-                        )
+                    # Filter variables for selection (exclude COVID dummy)
+                    var_options = [col for col in data_plot.columns if col in forecast_df.columns]
+                    var_choice = st.selectbox("Select Variable for FEVD", var_options, key='fevd_var')
 
-                        with st.expander("📊 FEVD Table"):
-                            fevd_display = fevd_df[fevd_df['Response'] == var_choice].copy()
-                            st.dataframe(fevd_display, use_container_width=True)
+                    st.plotly_chart(
+                        plot_fevd(fevd_df, var_choice, forecast_periods),
+                        use_container_width=True
+                    )
 
-                        # Download forecast
-                        csv = forecast_df.to_csv(index=True)
-                        st.download_button(
-                            label="📥 Download Forecast Data (CSV)",
-                            data=csv,
-                            file_name=f"forecast_{country_choice}.csv",
-                            mime="text/csv"
-                        )
+                    with st.expander("📊 FEVD Table"):
+                        fevd_display = fevd_df[fevd_df['Response'] == var_choice].copy()
+                        st.dataframe(fevd_display, use_container_width=True)
 
-                    except Exception as e:
-                        st.error(f"Error generating forecasts: {str(e)}")
-                        import traceback
-                        st.code(traceback.format_exc())
-            else:
-                st.info("Forecasting functionality for VECM models coming soon. Currently only available for VAR models.")
+                    # Download forecast
+                    csv = forecast_df.to_csv(index=True)
+                    st.download_button(
+                        label="📥 Download Forecast Data (CSV)",
+                        data=csv,
+                        file_name=f"forecast_{country_choice}_{model_type}.csv",
+                        mime="text/csv"
+                    )
+
+                except Exception as e:
+                    st.error(f"Error generating forecasts: {str(e)}")
+                    import traceback
+                    st.code(traceback.format_exc())
 
     # TAB 6: Granger Causality
     with tabs[5]:
